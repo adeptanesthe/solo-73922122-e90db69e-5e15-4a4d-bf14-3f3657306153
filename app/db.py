@@ -41,6 +41,34 @@ CREATE TABLE IF NOT EXISTS evaluations (
     created_at TEXT NOT NULL,
     result_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'closed')),
+    created_at TEXT NOT NULL,
+    closed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS round_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    round_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    new_rank INTEGER NOT NULL,
+    UNIQUE (round_id, item_id)
+);
+CREATE TABLE IF NOT EXISTS exposures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    round_id INTEGER NOT NULL,
+    exposure_no INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    feedback INTEGER,
+    feedback_at TEXT,
+    UNIQUE (round_id, exposure_no)
+);
+-- 硬性约束：同一轮里每个物品至多存在一条待反馈（feedback IS NULL）曝光
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exposures_one_pending
+    ON exposures (round_id, item_id) WHERE feedback IS NULL;
 """
 
 
@@ -49,8 +77,10 @@ def utcnow() -> str:
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
+    # 并发领取时等待写锁而非立即报 database is locked
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

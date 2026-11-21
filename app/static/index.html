@@ -46,6 +46,13 @@
   a { color: #2563eb; }
   .hist-item { cursor: pointer; }
   .hist-item:hover { background: #f9fafb; }
+  .cand-box { max-height: 220px; overflow-y: auto; border: 1px solid #d1d5db; border-radius: 6px; padding: 8px 12px; margin-top: 8px; font-size: 13px; }
+  .cand-box label { display: inline-block; min-width: 200px; margin: 2px 0; font-weight: normal; }
+  .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #fef9c3; color: #854d0e; }
+  .pill.clicked { background: #dcfce7; color: #166534; }
+  .pill.noclick { background: #f3f4f6; color: #4b5563; }
+  button:disabled { background: #9ca3af; cursor: not-allowed; }
+  .mini { font-size: 12px; padding: 3px 10px; }
 </style>
 </head>
 <body>
@@ -122,6 +129,60 @@
     <thead><tr><th>会话</th><th>原因</th><th>匹配数</th><th>ESS</th></tr></thead>
     <tbody></tbody>
   </table>
+</section>
+
+<section>
+  <h2>单位置试投（线上小流量）</h2>
+  <p class="hint">
+    从已导入会话的候选物品中选 <strong>1～20 个</strong>开一轮。每轮中每个物品最多有一条<strong>待反馈曝光</strong>；
+    领取时优先选尚无反馈的物品，均有反馈后按本轮结果计算 <strong>UCB1</strong> 得分选最高者，并列按物品 ID 升序。
+    替换日志不影响已开轮次（开轮时已快照候选）。
+  </p>
+
+  <div id="noRoundBox">
+    <div class="row">
+      <button onclick="loadTrialCandidates()">加载候选物品</button>
+      <span class="hint" id="candHint"></span>
+    </div>
+    <div class="cand-box hidden" id="candBox"></div>
+    <div class="row" style="margin-top:10px;">
+      <button id="openRoundBtn" onclick="openRound()">用所选物品开轮</button>
+      <span class="hint">已选 <span id="candSelected">0</span> / 20 个</span>
+    </div>
+    <div class="msg" id="trialMsg"></div>
+  </div>
+
+  <div id="roundBox" class="hidden">
+    <div class="row">
+      <span>轮次 <strong id="roundId"></strong></span>
+      <span class="pill" id="roundStatus"></span>
+      <span class="hint">开轮时间：<span id="roundCreated"></span></span>
+      <span class="hint">候选 <span id="roundCandCount"></span> 个 · 已登记反馈 <span id="roundFeedbackCount"></span> 条 · 待反馈 <span id="roundPendingCount"></span> 条</span>
+      <button class="danger mini" id="closeRoundBtn" onclick="closeRound()">关闭本轮</button>
+    </div>
+
+    <div class="row" style="margin-top:12px;">
+      <button id="claimBtn" onclick="claimExposure()">领取曝光</button>
+    </div>
+    <div class="msg" id="claimMsg"></div>
+
+    <h2 style="margin-top:16px;">曝光记录（刷新页面仍保留，按编号登记）</h2>
+    <table id="exposureTable">
+      <thead><tr>
+        <th>曝光编号</th><th>展示物品</th><th>领取时间(UTC)</th><th>反馈状态</th><th>操作</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <h2 style="margin-top:16px;">候选物品本轮统计</h2>
+    <table id="trialStatsTable">
+      <thead><tr>
+        <th>物品 ID</th><th>来源会话</th><th>新策略位次</th><th>已登记反馈</th><th>点击数</th>
+        <th>点击率</th><th>UCB1 得分</th><th>待反馈曝光</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
 </section>
 
 <section>
@@ -267,8 +328,145 @@ async function loadEval(id) {
   catch (e) { alert("加载评估记录失败：" + e.message); }
 }
 
+// ---------------- 单位置试投 ----------------
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function setTrialMsg(text, ok) { setMsg("trialMsg", text, ok); }
+function setClaimMsg(text, ok) { setMsg("claimMsg", text, ok); }
+
+let candidatePool = [];
+
+async function loadTrialCandidates() {
+  try {
+    candidatePool = await api("/api/trial/candidates");
+    const box = document.getElementById("candBox");
+    if (!candidatePool.length) {
+      box.classList.add("hidden");
+      document.getElementById("candHint").textContent = "候选物品为空，请先在第 1 步导入日志。";
+      return;
+    }
+    document.getElementById("candHint").textContent =
+      `共 ${candidatePool.length} 个去重候选物品（按物品 ID 排序，最多选 20 个）`;
+    box.innerHTML = candidatePool.map(c => `
+      <label><input type="checkbox" class="candChk" value="${esc(c.item_id)}"
+        onchange="onCandCheck()"> ${esc(c.item_id)}
+        <span class="hint">（会话 ${esc(c.session_id)}，位次 ${c.new_rank}）</span></label>`).join("");
+    box.classList.remove("hidden");
+    onCandCheck();
+  } catch (e) { document.getElementById("candHint").textContent = "加载失败：" + e.message; }
+}
+
+function onCandCheck() {
+  const checks = [...document.querySelectorAll(".candChk")];
+  const picked = checks.filter(c => c.checked);
+  document.getElementById("candSelected").textContent = picked.length;
+  // 超出 20 个后禁用其余未选项
+  checks.forEach(c => {
+    if (!c.checked) c.disabled = picked.length >= 20;
+  });
+}
+
+async function openRound() {
+  const ids = [...document.querySelectorAll(".candChk:checked")].map(c => c.value);
+  if (!ids.length) { setTrialMsg("请至少勾选 1 个候选物品", false); return; }
+  if (ids.length > 20) { setTrialMsg("最多只能选择 20 个候选物品", false); return; }
+  try {
+    await api("/api/trial/rounds", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_ids: ids }),
+    });
+    setTrialMsg("已开轮，候选：" + ids.join(", "), true);
+    await loadRoundState();
+  } catch (e) { setTrialMsg("开轮失败：" + e.message, false); }
+}
+
+async function closeRound() {
+  if (!confirm("确定关闭当前试投轮次？关闭后不能再领取或登记。")) return;
+  try {
+    const st = await api("/api/trial/rounds/close", { method: "POST" });
+    setClaimMsg(`轮次 ${st.id} 已关闭。`, true);
+    renderRound(st);
+  } catch (e) { setClaimMsg("关闭失败：" + e.message, false); }
+}
+
+async function claimExposure() {
+  try {
+    const r = await api("/api/trial/claim", { method: "POST" });
+    setClaimMsg(`领取成功：请展示物品 ${r.item_id}，曝光编号 #${r.exposure_no}`, true);
+    await loadRoundState();
+  } catch (e) { setClaimMsg("领取失败：" + e.message, false); }
+}
+
+async function registerFeedback(no, clicked) {
+  try {
+    const r = await api(`/api/trial/exposures/${no}/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clicked }),
+    });
+    setClaimMsg(`曝光 #${r.exposure_no}（物品 ${r.item_id}）已登记：${clicked ? "点击" : "未点击"}`, true);
+    await loadRoundState();
+  } catch (e) { setClaimMsg("登记失败：" + e.message, false); }
+}
+
+function renderRound(st) {
+  document.getElementById("noRoundBox").classList.add("hidden");
+  document.getElementById("roundBox").classList.remove("hidden");
+  document.getElementById("roundId").textContent = "#" + st.id;
+  const statusEl = document.getElementById("roundStatus");
+  statusEl.textContent = st.status === "active" ? "进行中" : "已关闭";
+  document.getElementById("roundCreated").textContent = st.created_at;
+  document.getElementById("roundCandCount").textContent = st.candidate_count;
+  document.getElementById("roundFeedbackCount").textContent = st.n_feedback;
+  document.getElementById("roundPendingCount").textContent = st.n_pending;
+  const closed = st.status !== "active";
+  document.getElementById("claimBtn").disabled = closed;
+  document.getElementById("closeRoundBtn").disabled = closed;
+
+  document.querySelector("#exposureTable tbody").innerHTML = st.exposures.map(e => {
+    let state, actions;
+    if (e.feedback === null || e.feedback === undefined) {
+      state = '<span class="pill">待反馈</span>';
+      actions = closed
+        ? '<span class="hint">轮次已关闭</span>'
+        : `<button class="mini" onclick="registerFeedback(${e.exposure_no}, 1)">登记点击</button>
+           <button class="secondary mini" onclick="registerFeedback(${e.exposure_no}, 0)">登记未点击</button>`;
+    } else {
+      const cls = e.feedback === 1 ? "clicked" : "noclick";
+      state = `<span class="pill ${cls}">${e.feedback === 1 ? "已点击" : "未点击"}</span>
+               <span class="hint">${e.feedback_at || ""}</span>`;
+      actions = '<span class="hint">首次结果已锁定</span>';
+    }
+    return `<tr><td>#${e.exposure_no}</td><td>${esc(e.item_id)}</td>
+      <td>${esc(e.created_at)}</td><td>${state}</td><td>${actions}</td></tr>`;
+  }).join("") || '<tr><td colspan="5" class="hint">暂无曝光，点击"领取曝光"开始。</td></tr>';
+
+  document.querySelector("#trialStatsTable tbody").innerHTML = st.candidates.map(c => {
+    const s = st.stats[c.item_id] || { pulls: 0, clicks: 0, ucb1: null, pending: 0 };
+    const ctr = s.pulls ? (s.clicks / s.pulls).toFixed(4) : "—";
+    return `<tr><td>${esc(c.item_id)}</td><td>${esc(c.session_id)}</td><td>${c.new_rank}</td>
+      <td>${s.pulls}</td><td>${s.clicks}</td><td>${ctr}</td>
+      <td>${s.ucb1 === null ? "—" : s.ucb1}</td><td>${s.pending}</td></tr>`;
+  }).join("");
+}
+
+async function loadRoundState() {
+  const st = await api("/api/trial/rounds/active");
+  if (st.active) {
+    renderRound(st);
+  } else {
+    document.getElementById("noRoundBox").classList.remove("hidden");
+    document.getElementById("roundBox").classList.add("hidden");
+  }
+}
+
 refreshStatus();
 loadHistory();
+loadRoundState();
 </script>
 </body>
 </html>

@@ -76,6 +76,34 @@ docker compose run --rm web python -m pytest tests -v
 - 导入时选 **替换** 模式（或先点"清空日志"）上传新日志，再点 **运行评估**；
 - 每次评估的参数与结果都存入 `evaluations` 表，页面底部"历史评估"可回看任意一次。
 
+## 单位置试投（线上小流量 bandit）
+
+页面中部"单位置试投"区块提供一个可在浏览器演示的单物品试投入口：
+
+1. **开轮**：从已导入会话的候选物品中勾选 **1～20 个**物品开一轮；开轮时把候选快照写入
+   `round_candidates`，之后即使替换日志，本轮仍使用开轮时的候选。同一时间只允许一个进行中的轮次。
+2. **领取曝光**：点击"领取曝光"，接口返回答展示的物品与曝光编号（轮内从 1 递增）。
+   - 同一轮中**每个物品最多有一条待反馈曝光**，由数据库部分唯一索引
+     （`WHERE feedback IS NULL`）与 `BEGIN IMMEDIATE` 写事务共同保证，多页面同时领取也不超限；
+   - 可领物品中**优先选尚无任何反馈的**，并列按物品 ID 升序；
+   - 若可领物品都已有反馈，按本轮已登记结果计算 **UCB1**：
+     `avg_i + sqrt(2·ln(N)/n_i)`，`N` 为本轮已登记反馈总数，取得分最高者，并列按物品 ID 升序；
+   - 候选全部在等待反馈时返回 409，页面提示先登记。
+3. **登记反馈**：刷新页面仍能看到待反馈曝光，按曝光编号登记"点击/未点击"；
+   **重复登记以首次结果为准**（后续请求返回 409 且不改写）。
+4. **关闭轮次**：关闭后不能再领取或登记；关闭后才可开新一轮。
+
+### 试投 API 一览
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/trial/candidates` | 已导入候选物品池（按物品 ID 去重排序） |
+| POST | `/api/trial/rounds` | 开轮，JSON `{"item_ids": [...]}`（1~20 个） |
+| GET | `/api/trial/rounds/active` | 当前进行中轮次的完整状态（候选/曝光/统计/UCB1） |
+| POST | `/api/trial/rounds/close` | 关闭当前轮次 |
+| POST | `/api/trial/claim` | 领取一次曝光，返回 `{exposure_no, item_id, ...}` |
+| POST | `/api/trial/exposures/{no}/feedback` | 按编号登记，JSON `{"clicked": 0|1}`；重复登记 409 |
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -88,17 +116,20 @@ docker compose run --rm web python -m pytest tests -v
 | GET | `/api/evaluations/{id}` | 单次评估详情 |
 | GET | `/api/status` | 当前数据量 |
 | GET | `/api/sample-csv` | 下载示例 CSV |
+| GET | `/api/trial/candidates` | 试投候选物品池（见上节） |
+| POST | `/api/trial/rounds` | 开/关试投轮次、领取、登记（见上节） |
 
 ## 目录结构
 
 ```
 app/
-  main.py       # FastAPI 路由
+  main.py       # FastAPI 路由（评估 + 单位置试投）
   metrics.py    # 截断 IPS / SNIPS / ESS 纯函数
+  bandit.py     # 试投选择策略（新鲜优先 + UCB1）纯函数
   importer.py   # CSV 解析校验
-  db.py         # SQLite 连接与建表
+  db.py         # SQLite 连接与建表（含试投轮次/快照/曝光表）
   static/index.html  # 操作页面
-tests/          # pytest 自测（指标 + API 端到端）
+tests/          # pytest 自测（指标 + API 端到端 + 试投策略/并发）
 sample_data/    # 示例日志
 Dockerfile / docker-compose.yml
 ```
