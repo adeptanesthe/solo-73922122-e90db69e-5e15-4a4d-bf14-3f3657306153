@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>推荐策略反事实评估工具</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background: #f3f5f7; color: #24292f; }
+  header { background: #1f2937; color: #fff; padding: 16px 24px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; font-size: 12px; color: #9ca3af; }
+  main { max-width: 1080px; margin: 20px auto; padding: 0 16px 40px; }
+  section { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+  h2 { font-size: 15px; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid #eee; }
+  h2 .step { display: inline-block; background: #2563eb; color: #fff; border-radius: 50%; width: 20px; height: 20px; line-height: 20px; text-align: center; font-size: 12px; margin-right: 6px; }
+  button { background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 7px 16px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #1d4ed8; }
+  button.secondary { background: #6b7280; }
+  button.danger { background: #dc2626; }
+  input[type="number"] { width: 110px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; }
+  select { padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; }
+  label { font-size: 13px; margin-right: 6px; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .msg { font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+  .msg.ok { color: #15803d; }
+  .msg.err { color: #dc2626; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 10px; text-align: left; }
+  th { background: #f9fafb; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+  .card { flex: 1; min-width: 150px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
+  .card .v { font-size: 22px; font-weight: 600; }
+  .card .k { font-size: 12px; color: #6b7280; margin-top: 4px; }
+  .verdict { padding: 10px 14px; border-radius: 8px; font-weight: 600; font-size: 14px; margin-top: 8px; }
+  .verdict.pass { background: #dcfce7; color: #166534; }
+  .verdict.fail { background: #fee2e2; color: #991b1b; }
+  .verdict.no_data { background: #f3f4f6; color: #4b5563; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+  .tag.included { background: #dcfce7; color: #166534; }
+  .tag.excluded_uncovered { background: #fef9c3; color: #854d0e; }
+  .tag.excluded_insufficient { background: #ffedd5; color: #9a3412; }
+  .hint { font-size: 12px; color: #6b7280; line-height: 1.7; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .hidden { display: none; }
+  a { color: #2563eb; }
+  .hist-item { cursor: pointer; }
+  .hist-item:hover { background: #f9fafb; }
+</style>
+</head>
+<body>
+<header>
+  <h1>推荐策略反事实评估工具</h1>
+  <p>导入旧策略曝光日志 + 新策略候选排序，按会话计算截断 IPS 与自归一化（SNIPS）点击率</p>
+</header>
+<main>
+
+<section>
+  <h2><span class="step">1</span>导入日志</h2>
+  <div class="row">
+    <input type="file" id="file" accept=".csv">
+    <select id="mode">
+      <option value="append">追加（相同事件号自动去重）</option>
+      <option value="replace">替换（清空旧日志后导入）</option>
+    </select>
+    <button onclick="doImport()">上传导入</button>
+    <button class="danger" onclick="clearLogs()">清空日志</button>
+    <a href="/api/sample-csv" download>下载示例 CSV</a>
+  </div>
+  <div class="msg" id="importMsg"></div>
+  <p class="hint">
+    CSV 列：<code>session_id,event_no,item_id,position,clicked,propensity,new_rank</code>。
+    <code>propensity</code> 为旧策略倾向分数（0~1）；<code>new_rank</code> 为该物品在新策略候选排序中的位次（从 1 开始，留空表示未被新策略推荐）。
+    若新策略推荐了某物品但日志中没有曝光，可写一行 <code>event_no</code> 留空、仅填 <code>session_id,item_id,new_rank</code> 的"仅候选行"，用于识别未覆盖候选。
+    相同 <code>event_no</code> 只会被处理一次；修改日志后请选择"替换"导入或清空后重新导入，再重新评估。
+  </p>
+  <div class="msg" id="statusLine"></div>
+</section>
+
+<section>
+  <h2><span class="step">2</span>设置参数并评估</h2>
+  <div class="row">
+    <label>截断上限 M（权重 w = min(1/p, M)）</label>
+    <input type="number" id="cap" value="10" min="0.01" step="any">
+    <label>有效样本量阈值 ESS</label>
+    <input type="number" id="minEss" value="2" min="0" step="any">
+    <button onclick="runEval()">运行评估</button>
+  </div>
+  <div class="msg" id="evalMsg"></div>
+</section>
+
+<section id="resultSection" class="hidden">
+  <h2><span class="step">3</span>评估结论（仅统计纳入会话）</h2>
+  <div id="verdict"></div>
+  <div class="cards" id="overallCards"></div>
+  <p class="hint">判定规则：纳入会话的平均截断 IPS 点击率 ≥ 旧策略实测点击率 → 通过。被排除的未覆盖候选与样本不足会话<strong>不计入</strong>以上结论，见下方单列。</p>
+</section>
+
+<section id="sessionSection" class="hidden">
+  <h2>逐会话明细</h2>
+  <table id="sessionTable">
+    <thead><tr>
+      <th>会话</th><th>曝光数</th><th>候选数</th><th>匹配数</th><th>Σw</th><th>ESS</th>
+      <th>截断IPS CTR</th><th>SNIPS CTR</th><th>旧策略实测CTR</th><th>状态</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section id="uncoveredSection" class="hidden">
+  <h2>新策略未覆盖的候选（未计入结论）</h2>
+  <p class="hint">以下候选出现在新策略排序中，但日志里没有对应曝光、拿不到倾向分数，其所在会话已整体排除。</p>
+  <table id="uncoveredTable">
+    <thead><tr><th>会话</th><th>物品</th><th>新策略位次</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section id="insufficientSection" class="hidden">
+  <h2>样本不足的会话（未计入结论）</h2>
+  <table id="insufficientTable">
+    <thead><tr><th>会话</th><th>原因</th><th>匹配数</th><th>ESS</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>历史评估</h2>
+  <table id="historyTable">
+    <thead><tr>
+      <th>ID</th><th>时间(UTC)</th><th>截断上限</th><th>ESS阈值</th>
+      <th>纳入会话</th><th>截断IPS CTR</th><th>SNIPS CTR</th><th>结论</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+</main>
+
+<script>
+const VERDICT_TEXT = {
+  pass: "通过：截断 IPS 估计的新策略点击率不低于旧策略实测点击率",
+  fail: "未通过：截断 IPS 估计的新策略点击率低于旧策略实测点击率",
+  no_data: "无有效会话：所有会话均因未覆盖或样本不足被排除，无法得出结论",
+};
+const STATUS_TEXT = { included: "纳入", excluded_uncovered: "排除·未覆盖", excluded_insufficient: "排除·样本不足" };
+const fmt = (v) => (v === null || v === undefined) ? "—" : Number(v).toFixed(4);
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+function setMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "msg " + (ok ? "ok" : "err");
+}
+
+async function refreshStatus() {
+  try {
+    const s = await api("/api/status");
+    document.getElementById("statusLine").textContent =
+      `当前数据：${s.events} 条曝光事件 / ${s.sessions} 个会话 / ${s.candidates} 个候选物品 / ${s.evaluations} 次历史评估`;
+    document.getElementById("statusLine").className = "msg ok";
+  } catch (e) { /* 忽略 */ }
+}
+
+async function doImport() {
+  const f = document.getElementById("file").files[0];
+  if (!f) { setMsg("importMsg", "请先选择 CSV 文件", false); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("mode", document.getElementById("mode").value);
+  try {
+    const r = await api("/api/import", { method: "POST", body: fd });
+    setMsg("importMsg",
+      `导入完成：曝光行 ${r.exposure_rows} 条，实际写入 ${r.inserted} 条，` +
+      `跳过重复事件号 ${r.duplicates_skipped} 条；候选物品写入 ${r.candidate_items_inserted} 个` +
+      `（其中仅候选行 ${r.candidate_only_rows} 条）。`, true);
+    refreshStatus();
+  } catch (e) { setMsg("importMsg", "导入失败：" + e.message, false); }
+}
+
+async function clearLogs() {
+  if (!confirm("确定清空全部日志（曝光与候选）？历史评估记录会保留。")) return;
+  try {
+    const r = await api("/api/logs", { method: "DELETE" });
+    setMsg("importMsg", `已清空：删除 ${r.deleted_events} 条曝光、${r.deleted_candidates} 个候选。`, true);
+    refreshStatus();
+  } catch (e) { setMsg("importMsg", "清空失败：" + e.message, false); }
+}
+
+async function runEval() {
+  const cap = parseFloat(document.getElementById("cap").value);
+  const minEss = parseFloat(document.getElementById("minEss").value);
+  try {
+    const r = await api("/api/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cap, min_ess: minEss }),
+    });
+    renderResult(r);
+    setMsg("evalMsg", `评估完成（ID=${r.id}，截断上限=${r.cap}，ESS阈值=${r.min_ess}）`, true);
+    loadHistory();
+  } catch (e) { setMsg("evalMsg", "评估失败：" + e.message, false); }
+}
+
+function renderResult(r) {
+  document.getElementById("resultSection").classList.remove("hidden");
+  const v = document.getElementById("verdict");
+  v.className = "verdict " + r.verdict;
+  v.textContent = VERDICT_TEXT[r.verdict] || r.verdict;
+  const o = r.overall;
+  document.getElementById("overallCards").innerHTML = [
+    [o.included_sessions, "纳入会话数"],
+    [o.excluded_sessions, "排除会话数"],
+    [fmt(o.ips_ctr), "截断 IPS 点击率"],
+    [fmt(o.snips_ctr), "自归一化 SNIPS 点击率"],
+    [fmt(o.baseline_ctr), "旧策略实测点击率"],
+    [o.total_events, "纳入曝光事件数"],
+  ].map(([val, k]) => `<div class="card"><div class="v">${val}</div><div class="k">${k}</div></div>`).join("");
+
+  document.getElementById("sessionSection").classList.remove("hidden");
+  document.querySelector("#sessionTable tbody").innerHTML = r.per_session.map(s => `
+    <tr>
+      <td>${s.session_id}</td><td>${s.n_events}</td><td>${s.n_candidates}</td><td>${s.matched}</td>
+      <td>${fmt(s.sum_w)}</td><td>${fmt(s.ess)}</td>
+      <td>${fmt(s.ips_ctr)}</td><td>${fmt(s.snips_ctr)}</td><td>${fmt(s.baseline_ctr)}</td>
+      <td><span class="tag ${s.status}">${STATUS_TEXT[s.status]}</span>${s.reason ? " " + s.reason : ""}</td>
+    </tr>`).join("");
+
+  const us = document.getElementById("uncoveredSection");
+  if (r.uncovered_candidates.length) {
+    us.classList.remove("hidden");
+    document.querySelector("#uncoveredTable tbody").innerHTML = r.uncovered_candidates.map(u =>
+      `<tr><td>${u.session_id}</td><td>${u.item_id}</td><td>${u.new_rank}</td></tr>`).join("");
+  } else us.classList.add("hidden");
+
+  const is = document.getElementById("insufficientSection");
+  if (r.insufficient_sessions.length) {
+    is.classList.remove("hidden");
+    document.querySelector("#insufficientTable tbody").innerHTML = r.insufficient_sessions.map(s =>
+      `<tr><td>${s.session_id}</td><td>${s.reason}</td><td>${s.matched}</td><td>${fmt(s.ess)}</td></tr>`).join("");
+  } else is.classList.add("hidden");
+}
+
+async function loadHistory() {
+  try {
+    const list = await api("/api/evaluations");
+    document.querySelector("#historyTable tbody").innerHTML = list.map(h => `
+      <tr class="hist-item" onclick="loadEval(${h.id})">
+        <td>${h.id}</td><td>${h.created_at}</td><td>${h.cap}</td><td>${h.min_ess}</td>
+        <td>${h.included_sessions}</td><td>${fmt(h.ips_ctr)}</td><td>${fmt(h.snips_ctr)}</td>
+        <td><span class="tag ${h.verdict === "pass" ? "included" : (h.verdict === "fail" ? "excluded_insufficient" : "")}">${VERDICT_TEXT[h.verdict] ? h.verdict : h.verdict}</span></td>
+      </tr>`).join("");
+  } catch (e) { /* 忽略 */ }
+}
+
+async function loadEval(id) {
+  try { renderResult(await api("/api/evaluations/" + id)); }
+  catch (e) { alert("加载评估记录失败：" + e.message); }
+}
+
+refreshStatus();
+loadHistory();
+</script>
+</body>
+</html>

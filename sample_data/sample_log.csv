@@ -1,0 +1,9 @@
+session_id,event_no,item_id,position,clicked,propensity,new_rank
+s1,1001,itemA,1,1,0.50,1
+s1,1002,itemB,2,0,0.25,2
+s1,1003,itemC,3,1,0.50,
+s2,1004,itemA,1,1,0.50,1
+s2,1005,itemD,2,0,0.50,2
+s3,1006,itemE,1,0,0.50,
+s3,,itemF,,,,1
+s4,1007,itemG,1,1,0.90,

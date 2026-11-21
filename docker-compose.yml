@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_PATH=/data/recs_eval.db
+    volumes:
+      - recs_eval_data:/data
+    restart: unless-stopped
+
+volumes:
+  recs_eval_data:
